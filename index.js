@@ -1,6 +1,7 @@
 'use strict';
 
-var app = {}; // create namespace for our app
+var app = {};
+app.LORDS_COUNT = 5;
 
 //--------------
 // Models
@@ -16,6 +17,8 @@ app.DarkLord = Backbone.Model.extend({
     urlRoot: 'http://jedi.smartjs.academy/dark-jedis/',
     url: function () {
         return this.urlRoot + this.id;
+    }, defaults: {
+        activeClass:  ''
     }
 });
 
@@ -24,7 +27,7 @@ app.DarkLord = Backbone.Model.extend({
 //--------------
 app.DarkLords = Backbone.Collection.extend({
     model: app.DarkLord,
-    localStorage: new Store("dark-jedis")
+    localStorage: new Store('dark-jedis')
 });
 
 
@@ -36,12 +39,10 @@ app.CurrentLocationView = Backbone.View.extend({
     el: '#planet-monitor',
     template: _.template('Obi-Wan currently on <%- name %>'),
     initialize: function () {
-        //console.log('====> init', this.model);
-        this.model.on("change", this.render, this);
+        this.model.on('change', this.render, this);
         this.render();
     },
     render: function () {
-        //console.log('====> render');
         this.$el.html(this.template(this.model.toJSON()));
         return this; // enable chained calls
     }
@@ -58,107 +59,138 @@ app.LordView = Backbone.View.extend({
 
 app.LordsView = Backbone.View.extend({
     el: '#lords-view',
-    initialize: function () {
-        this.model.on('"reset add remove"', this.addAll, this);
+    initialize: function (options) {
+        this.options = options;
+        console.log('===>> options: ', this)
+        this.model.on('reset add remove', this.render, this);
+        this.options.currentLocation.on('change', this.checkActivePlanet, this);
     },
     events: {
-        "click .css-button-up": "upPressed",
-        "click .css-button-down": "downPressed"
+        'click .css-button-up': 'upPressed',
+        'click .css-button-down': 'downPressed'
     },
-    upPressed: function (e) {
-        var view = this;
-        if (this.scrollingUp) {
-            console.log("skip scrolling up");
+    checkActivePlanet: function () {
+        console.log('===> changed', this.options.currentLocation.get('id'));
+        var lord = findLordByLocationId(this.model, this.options.currentLocation.get('id'));
+        if (this.activeLord) {
+            this.activeLord.set('activeClass', '');
+            this.activeLord = null;
+            this.render();
+            this.fill();
+        }
+
+        if (lord) {
+            console.log("ACTIVE PLANET FOUND");
+            this.activeLord = lord;
+            lord.set('activeClass', 'active');
+            this.abortActiveQuery();
+            this.render();
+        }
+        console.log("====> lord by planet ", this.options.currentLocation.get('name'), lord);
+    },
+    upPressed: function () {
+        if (!this.isScrollUpEnabled()) {
             return;
         }
-        if (this.activeScrollDown) {
-            this.activeScrollDown.abort();
-            console.log("active scroll down aborted");
-        }
-
-        this.scrollingUp = true;
-        //TODO: abort old
-        var scrollUp = this.scrollUp.bind(this);
-        $.when(scrollUp()).always(function() {
-            $.when(scrollUp()).always(function() {
-                view.scrollingUp = false;
-            });
-        });
-
+        this.abortActiveQuery();
+        this.model.pop();
+        this.model.pop();
+        this.model.unshift(createEmptyLord(this.model));
+        this.model.unshift(createEmptyLord(this.model));
+        this.fill();
     },
-    scrollUp: function() {
+    downPressed: function () {
+        if (!this.isScrollDownEnabled()) {
+            return;
+        }
+        this.abortActiveQuery();
+        this.model.shift();
+        this.model.shift();
+        this.model.push(createEmptyLord(this.model));
+        this.model.push(createEmptyLord(this.model));
+        this.fill();
+    },
+    abortActiveQuery: function() {
+        if (this.activeQuery) {
+            this.activeQuery.abort();
+        }
+    },
+    fill: function () {
+        var lords = this.model;
+        var fillNext = this.fill.bind(this);
+        var checkActivePlanet = this.checkActivePlanet.bind(this);
+
+        var firstNotEmptyIndex = findFirstNotEmptyIndex(lords);
+
+        if (firstNotEmptyIndex > 0) {
+            console.log(">>>>>>>>firstNotEmptyIndex: ", firstNotEmptyIndex);
+            var firstNotEmpty = lords.at(firstNotEmptyIndex);
+
+            var newLordId = firstNotEmpty.get('master').id;
+            if (!newLordId) {
+                return;
+            }
+
+            this.activeQuery = fetchAndAddNewLord(lords, newLordId, firstNotEmptyIndex - 1);
+            this.activeQuery.done(function () {
+                checkActivePlanet();
+                fillNext();
+            }).always(function () {
+                this.activeQuery = null;
+            });
+        } else {
+            var lastNotEmptyIndex = findLastNotEmptyIndex(lords);
+            console.log(">>>>>>>>lastNotEmptyIndex: ", lastNotEmptyIndex);
+            if (!lastNotEmptyIndex) {
+                return;
+            }
+            var newLordId = this.model.at(lastNotEmptyIndex).get('apprentice').id;
+            if (!newLordId) {
+                return;
+            }
+            this.activeQuery = fetchAndAddNewLord(lords, newLordId, lastNotEmptyIndex + 1);
+            this.activeQuery.done(function () {
+                checkActivePlanet();
+                fillNext();
+            }).always(function () {
+                this.activeQuery = null;
+            });
+            ;
+        }
+    },
+    updateScrollsAvailability: function () {
+        this.updateScrollButtonAvailability('.css-button-up', this.isScrollUpEnabled());
+        this.updateScrollButtonAvailability('.css-button-down', this.isScrollDownEnabled());
+    },
+    updateScrollButtonAvailability: function (btnClass, value) {
+        var btnEl = $(btnClass);
+        if (value) {
+            btnEl.removeClass('css-button-disabled')
+        } else {
+            btnEl.addClass('css-button-disabled')
+        }
+    },
+    isScrollUpEnabled: function () {
         var firstMaster = this.model.at(0).get('master');
-        if (!firstMaster || !firstMaster.id) {
-            return;
-        }
-
-        var lord = new app.DarkLord({'id': firstMaster.id});
-        var lords = this.model;
-        var d = lord.fetch()
-            .done(function() {
-                if (lords.length >= 5) {
-                    lords.pop();
-                }
-                lords.unshift(lord);
-            }).always(function(){
-                this.activeScrollUp = null;
-            });
-        this.activeScrollUp = d;
-        return d;
+        return !this.activeLord && firstMaster && firstMaster.id;
     },
-    downPressed: function (e) {
-        var view = this;
-        if (this.scrollingDown) {
-            console.log("skip scrolling down");
-            return;
-        }
-
-        if (this.activeScrollUp) {
-            this.activeScrollUp.abort();
-            console.log("active scroll up aborted");
-        }
-        this.scrollingDown = true;
-        //TODO: abort old
-        var scrollDown = this.scrollDown.bind(this);
-        $.when(scrollDown()).always(function() {
-            $.when(scrollDown()).always(function() {
-                view.scrollingDown = false;
-            });;
-        });
-    },
-    scrollDown: function() {
+    isScrollDownEnabled: function () {
         var lastApprentice = this.model.at(this.model.length - 1).get('apprentice');
-        if (!lastApprentice || !lastApprentice.id) {
-            return;
-        }
-
-        var lord = new app.DarkLord({'id': lastApprentice.id});
-        var lords = this.model;
-        var d = lord.fetch()
-            .done(function() {
-                if (lords.length >= 5) {
-                    lords.shift();
-                }
-                lords.push(lord);
-            }).always(function(){
-                this.activeScrollDown = null;
-            });
-        this.activeScrollDown = d;
-        return d;
+        return !this.activeLord && lastApprentice && lastApprentice.id;
     },
-    addOne: function (lord) {
+    renderOne: function (lord) {
         var view = new app.LordView({model: lord});
         $('#lords-list').append(view.render().el);
     },
-    addAll: function () {
-        this.$('#lords-list').html(''); // clean the todo list
-        this.model.each(this.addOne, this);
+    render: function () {
+        this.$('#lords-list').html('');
+        this.model.each(this.renderOne, this);
+        this.updateScrollsAvailability();
     }
 });
 
 
-
-var socket = new WebSocket("ws://jedi.smartjs.academy");
+var socket = new WebSocket('ws://jedi.smartjs.academy');
 
 
 app.currentLocation = new app.Location();
@@ -169,22 +201,64 @@ socket.onmessage = function (event) {
 };
 
 app.currentLocationView = new app.CurrentLocationView({model: app.currentLocation});
-app.lordsView = new app.LordsView({model: app.lords});
+app.lordsView = new app.LordsView({model: app.lords, currentLocation: app.currentLocation});
 
 
-createLordAndFetchNext(3616);
+//TODO: crate LordsList wrapper
+createLordAndFetchNextApprentice(0, 3616);
 
-function createLordAndFetchNext(id) {
+for (var i = app.lords.length; i < app.LORDS_COUNT; i++) {
+    app.lords.push(createEmptyLord(app.lords));
+}
+
+function findLordByLocationId(lords, locationId) {
+    for (var i = 0; i < lords.length; i++) {
+        var homeworld = lords.at(i).get('homeworld');
+        if (homeworld && homeworld.id == locationId) {
+            return lords.at(i);
+        }
+    }
+}
+
+function createEmptyLord(lords) {
+    return new app.DarkLord({id: -lords.length - 1});
+}
+
+function fetchAndAddNewLord(lords, newLordId, newLordIndex) {
+    var newLord = new app.DarkLord({'id': newLordId});
+    var xhr = newLord.fetch();
+    xhr.done(function () {
+        lords.remove(lords.at(newLordIndex));
+        lords.add(newLord, {at: newLordIndex});
+    });
+    return xhr;
+}
+
+function findFirstNotEmptyIndex(lords) {
+    for (var i = 0; i < lords.length; i++) {
+        if (lords.at(i).id >= 0) {
+            return i;
+        }
+    }
+}
+
+function findLastNotEmptyIndex(lords) {
+    for (var i = 0; i < lords.length; i++) {
+        if (lords.at(i).id < 0) {
+            return i - 1;
+        }
+    }
+}
+
+function createLordAndFetchNextApprentice(index, id) {
     var lord = new app.DarkLord({'id': id});
-    console.log("createLordAndFetchNext id: ", lord.toJSON());
     lord.fetch()
         .done(function () {
-            console.log("====lord done: ", lord.toJSON());
-            console.log("lords: ", app.lords);
-            app.lords.push(lord);
+            app.lords.pop();
+            app.lords.add(lord, {at: index});
             var apprentice = lord.get('apprentice');
             if (apprentice && apprentice.id && app.lords.length < 6) {
-                createLordAndFetchNext(apprentice.id);
+                createLordAndFetchNextApprentice(index + 1, apprentice.id);
             }
         });
 }
