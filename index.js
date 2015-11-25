@@ -1,7 +1,6 @@
 'use strict';
 
 var app = {};
-app.LORDS_COUNT = 5;
 
 //--------------
 // Models
@@ -30,6 +29,82 @@ app.DarkLords = Backbone.Collection.extend({
     localStorage: new Store('dark-jedis')
 });
 
+app.LordsList = function() {
+    var vm = this;
+    vm.LORDS_COUNT = 5;
+
+    vm.lords = new app.DarkLords();
+
+    vm.findLordByLocationId = findLordByLocationId;
+    vm.createEmptyLord = createEmptyLord;
+    vm.fetchAndAddNewLord = fetchAndAddNewLord;
+    vm.findFirstNotEmptyIndex = findFirstNotEmptyIndex;
+    vm.findLastNotEmptyIndex = findLastNotEmptyIndex;
+
+    initialize();
+
+    /////////
+
+    function initialize() {
+        createLordAndFetchNextApprentice(0, 3616);
+        for (var i = vm.lords.length; i < vm.LORDS_COUNT; i++) {
+            vm.lords.push(createEmptyLord(vm.lords));
+        }
+    }
+
+    function createLordAndFetchNextApprentice(index, id) {
+        var lord = new app.DarkLord({'id': id});
+        lord.fetch()
+            .done(function () {
+                vm.lords.pop();
+                vm.lords.add(lord, {at: index});
+                var apprentice = lord.get('apprentice');
+                if (apprentice && apprentice.id && vm.lords.length <= vm.LORDS_COUNT) {
+                    createLordAndFetchNextApprentice(index + 1, apprentice.id);
+                }
+            });
+    }
+
+    function createEmptyLord() {
+        return new app.DarkLord({id: -vm.lords.length - 1});
+    }
+
+    function findLordByLocationId(locationId) {
+        for (var i = 0; i < vm.lords.length; i++) {
+            var homeworld = vm.lords.at(i).get('homeworld');
+            if (homeworld && homeworld.id == locationId) {
+                return vm.lords.at(i);
+            }
+        }
+    }
+
+    function fetchAndAddNewLord(newLordId, newLordIndex) {
+        var newLord = new app.DarkLord({'id': newLordId});
+        var xhr = newLord.fetch();
+        xhr.done(function () {
+            vm.lords.remove(vm.lords.at(newLordIndex));
+            vm.lords.add(newLord, {at: newLordIndex});
+        });
+        return xhr;
+    }
+
+    function findFirstNotEmptyIndex() {
+        for (var i = 0; i < vm.lords.length; i++) {
+            if (vm.lords.at(i).id >= 0) {
+                return i;
+            }
+        }
+    }
+
+    function findLastNotEmptyIndex() {
+        for (var i = 0; i < vm.lords.length; i++) {
+            if (vm.lords.at(i).id < 0) {
+                return i - 1;
+            }
+        }
+    }
+}
+
 
 //--------------
 // Views
@@ -39,8 +114,13 @@ app.CurrentLocationView = Backbone.View.extend({
     el: '#planet-monitor',
     template: _.template('Obi-Wan currently on <%- name %>'),
     initialize: function () {
+        var socket = new WebSocket('ws://jedi.smartjs.academy');
+        socket.onmessage = this.onLocationChange.bind(this);
         this.model.on('change', this.render, this);
         this.render();
+    },
+    onLocationChange: function (event) {
+        this.model.set(JSON.parse(event.data));
     },
     render: function () {
         this.$el.html(this.template(this.model.toJSON()));
@@ -60,43 +140,38 @@ app.LordView = Backbone.View.extend({
 app.LordsView = Backbone.View.extend({
     el: '#lords-view',
     initialize: function (options) {
-        this.options = options;
-        console.log('===>> options: ', this)
-        this.model.on('reset add remove', this.render, this);
-        this.options.currentLocation.on('change', this.checkActivePlanet, this);
+        this.currentLocation = options.currentLocation;
+        this.lordsList = this.model.lords;
+        this.lordsList.on('change reset add remove', this.render, this);
+        this.currentLocation.on('change', this.checkActivePlanet, this);
     },
     events: {
         'click .css-button-up': 'upPressed',
         'click .css-button-down': 'downPressed'
     },
     checkActivePlanet: function () {
-        console.log('===> changed', this.options.currentLocation.get('id'));
-        var lord = findLordByLocationId(this.model, this.options.currentLocation.get('id'));
         if (this.activeLord) {
             this.activeLord.set('activeClass', '');
             this.activeLord = null;
-            this.render();
             this.fill();
         }
 
+        var lord = this.model.findLordByLocationId(this.currentLocation.get('id'));
         if (lord) {
-            console.log("ACTIVE PLANET FOUND");
             this.activeLord = lord;
             lord.set('activeClass', 'active');
             this.abortActiveQuery();
-            this.render();
         }
-        console.log("====> lord by planet ", this.options.currentLocation.get('name'), lord);
     },
     upPressed: function () {
         if (!this.isScrollUpEnabled()) {
             return;
         }
         this.abortActiveQuery();
-        this.model.pop();
-        this.model.pop();
-        this.model.unshift(createEmptyLord(this.model));
-        this.model.unshift(createEmptyLord(this.model));
+        this.lordsList.pop();
+        this.lordsList.pop();
+        this.lordsList.unshift(this.model.createEmptyLord());
+        this.lordsList.unshift(this.model.createEmptyLord());
         this.fill();
     },
     downPressed: function () {
@@ -104,10 +179,10 @@ app.LordsView = Backbone.View.extend({
             return;
         }
         this.abortActiveQuery();
-        this.model.shift();
-        this.model.shift();
-        this.model.push(createEmptyLord(this.model));
-        this.model.push(createEmptyLord(this.model));
+        this.lordsList.shift();
+        this.lordsList.shift();
+        this.lordsList.push(this.model.createEmptyLord());
+        this.lordsList.push(this.model.createEmptyLord());
         this.fill();
     },
     abortActiveQuery: function() {
@@ -116,14 +191,17 @@ app.LordsView = Backbone.View.extend({
         }
     },
     fill: function () {
-        var lords = this.model;
+        if (this.activeLord) {
+            return;
+        }
+
+        var lords = this.lordsList;
         var fillNext = this.fill.bind(this);
         var checkActivePlanet = this.checkActivePlanet.bind(this);
 
-        var firstNotEmptyIndex = findFirstNotEmptyIndex(lords);
+        var firstNotEmptyIndex = this.model.findFirstNotEmptyIndex();
 
         if (firstNotEmptyIndex > 0) {
-            console.log(">>>>>>>>firstNotEmptyIndex: ", firstNotEmptyIndex);
             var firstNotEmpty = lords.at(firstNotEmptyIndex);
 
             var newLordId = firstNotEmpty.get('master').id;
@@ -131,7 +209,8 @@ app.LordsView = Backbone.View.extend({
                 return;
             }
 
-            this.activeQuery = fetchAndAddNewLord(lords, newLordId, firstNotEmptyIndex - 1);
+            var newLordIndex = firstNotEmptyIndex - 1;
+            this.activeQuery = this.model.fetchAndAddNewLord(newLordId, newLordIndex);
             this.activeQuery.done(function () {
                 checkActivePlanet();
                 fillNext();
@@ -139,16 +218,16 @@ app.LordsView = Backbone.View.extend({
                 this.activeQuery = null;
             });
         } else {
-            var lastNotEmptyIndex = findLastNotEmptyIndex(lords);
-            console.log(">>>>>>>>lastNotEmptyIndex: ", lastNotEmptyIndex);
+            var lastNotEmptyIndex = this.model.findLastNotEmptyIndex(lords);
             if (!lastNotEmptyIndex) {
                 return;
             }
-            var newLordId = this.model.at(lastNotEmptyIndex).get('apprentice').id;
+            var newLordId = this.lordsList.at(lastNotEmptyIndex).get('apprentice').id;
             if (!newLordId) {
                 return;
             }
-            this.activeQuery = fetchAndAddNewLord(lords, newLordId, lastNotEmptyIndex + 1);
+            var newLordIndex = lastNotEmptyIndex + 1;
+            this.activeQuery = this.model.fetchAndAddNewLord(newLordId, newLordIndex);
             this.activeQuery.done(function () {
                 checkActivePlanet();
                 fillNext();
@@ -171,11 +250,11 @@ app.LordsView = Backbone.View.extend({
         }
     },
     isScrollUpEnabled: function () {
-        var firstMaster = this.model.at(0).get('master');
+        var firstMaster = this.lordsList.at(0).get('master');
         return !this.activeLord && firstMaster && firstMaster.id;
     },
     isScrollDownEnabled: function () {
-        var lastApprentice = this.model.at(this.model.length - 1).get('apprentice');
+        var lastApprentice = this.lordsList.at(this.lordsList.length - 1).get('apprentice');
         return !this.activeLord && lastApprentice && lastApprentice.id;
     },
     renderOne: function (lord) {
@@ -184,81 +263,19 @@ app.LordsView = Backbone.View.extend({
     },
     render: function () {
         this.$('#lords-list').html('');
-        this.model.each(this.renderOne, this);
+        this.lordsList.each(this.renderOne, this);
         this.updateScrollsAvailability();
     }
 });
 
 
-var socket = new WebSocket('ws://jedi.smartjs.academy');
-
+///////////////////////////////////////////////////////
 
 app.currentLocation = new app.Location();
-app.lords = new app.DarkLords();
 
-socket.onmessage = function (event) {
-    app.currentLocation.set(JSON.parse(event.data));
-};
-
+var lordsList = new app.LordsList();
 app.currentLocationView = new app.CurrentLocationView({model: app.currentLocation});
-app.lordsView = new app.LordsView({model: app.lords, currentLocation: app.currentLocation});
+app.lordsView = new app.LordsView({model: lordsList, currentLocation: app.currentLocation});
 
 
-//TODO: crate LordsList wrapper
-createLordAndFetchNextApprentice(0, 3616);
 
-for (var i = app.lords.length; i < app.LORDS_COUNT; i++) {
-    app.lords.push(createEmptyLord(app.lords));
-}
-
-function findLordByLocationId(lords, locationId) {
-    for (var i = 0; i < lords.length; i++) {
-        var homeworld = lords.at(i).get('homeworld');
-        if (homeworld && homeworld.id == locationId) {
-            return lords.at(i);
-        }
-    }
-}
-
-function createEmptyLord(lords) {
-    return new app.DarkLord({id: -lords.length - 1});
-}
-
-function fetchAndAddNewLord(lords, newLordId, newLordIndex) {
-    var newLord = new app.DarkLord({'id': newLordId});
-    var xhr = newLord.fetch();
-    xhr.done(function () {
-        lords.remove(lords.at(newLordIndex));
-        lords.add(newLord, {at: newLordIndex});
-    });
-    return xhr;
-}
-
-function findFirstNotEmptyIndex(lords) {
-    for (var i = 0; i < lords.length; i++) {
-        if (lords.at(i).id >= 0) {
-            return i;
-        }
-    }
-}
-
-function findLastNotEmptyIndex(lords) {
-    for (var i = 0; i < lords.length; i++) {
-        if (lords.at(i).id < 0) {
-            return i - 1;
-        }
-    }
-}
-
-function createLordAndFetchNextApprentice(index, id) {
-    var lord = new app.DarkLord({'id': id});
-    lord.fetch()
-        .done(function () {
-            app.lords.pop();
-            app.lords.add(lord, {at: index});
-            var apprentice = lord.get('apprentice');
-            if (apprentice && apprentice.id && app.lords.length < 6) {
-                createLordAndFetchNextApprentice(index + 1, apprentice.id);
-            }
-        });
-}

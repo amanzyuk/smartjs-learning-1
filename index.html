@@ -27,8 +27,9 @@
 <script type="text/template" id="lord-template">
     <li class="css-slot <%- activeClass %>">
         <% if(id > -1) { %>
-            <h3><%- id %>-<%- name %>[<%- master.id %>, <%- apprentice.id %>]</h3>
-            <h6>Homeworld: <%- homeworld.name %><%- homeworld.id %></h6>
+           <!-- <h3><%- id %>-<%- name %>[<%- master.id %>, <%- apprentice.id %>]</h3>-->
+            <h3><%- name %></h3>
+            <h6>Homeworld: <%- homeworld.name %></h6>
         <% } %>
     </li>
 </script>
